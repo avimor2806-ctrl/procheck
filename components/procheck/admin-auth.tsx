@@ -1,45 +1,58 @@
 "use client";
 
 import { useState } from "react";
-import { Lock, Eye, EyeOff, ShieldCheck, AlertCircle } from "lucide-react";
+import { Lock, User, Eye, EyeOff, ShieldCheck, AlertCircle } from "lucide-react";
 import type { ThemeType } from "@/lib/types";
-
-const ADMIN_PASSWORD = process.env.NEXT_PUBLIC_ADMIN_PASSWORD || "admin123";
+import {
+  authenticate,
+  authenticateAsync,
+  saveSession,
+  ROLE_LABELS,
+  type SessionUser,
+} from "@/lib/users";
 
 interface AdminAuthProps {
   theme: ThemeType;
-  onAuthenticated: () => void;
+  onAuthenticated: (user: SessionUser) => void;
   onCancel: () => void;
 }
 
 export function AdminAuth({ theme, onAuthenticated, onCancel }: AdminAuthProps) {
+  const [username, setUsername] = useState("");
   const [password, setPassword] = useState("");
   const [showPassword, setShowPassword] = useState(false);
   const [error, setError] = useState("");
   const [attempts, setAttempts] = useState(0);
+  const [loading, setLoading] = useState(false);
 
-  const handleSubmit = (e: React.FormEvent) => {
+  const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
-    
+
     if (attempts >= 5) {
       setError("נחסמת זמנית. נסה שוב מאוחר יותר.");
       return;
     }
 
-    if (password === ADMIN_PASSWORD) {
-      sessionStorage.setItem("adminAuth", "true");
-      onAuthenticated();
-    } else {
-      setAttempts((prev) => prev + 1);
-      setError(`סיסמה שגויה. נותרו ${5 - attempts - 1} ניסיונות.`);
-      setPassword("");
+    setLoading(true);
+    try {
+      const user = await authenticateAsync(username, password);
+      if (user) {
+        saveSession(user);
+        onAuthenticated(user);
+      } else {
+        setAttempts((prev) => prev + 1);
+        setError(`פרטי כניסה שגויים. נותרו ${5 - attempts - 1} ניסיונות.`);
+        setPassword("");
+      }
+    } finally {
+      setLoading(false);
     }
   };
 
   return (
-    <div className="space-y-8 animate-fade">
+    <div className="space-y-6 sm:space-y-8 animate-fade">
       <div
-        className={`p-8 md:p-12 rounded-[2.5rem] border shadow-2xl transition-all duration-500 ${
+        className={`p-4 sm:p-8 md:p-12 rounded-3xl sm:rounded-[2.5rem] border shadow-2xl transition-all duration-500 ${
           theme === "dark"
             ? "bg-slate-900 border-white/10 shadow-black/50"
             : "bg-white border-slate-200"
@@ -47,29 +60,60 @@ export function AdminAuth({ theme, onAuthenticated, onCancel }: AdminAuthProps) 
       >
         <div className="max-w-md mx-auto text-center">
           <div
-            className={`w-20 h-20 mx-auto mb-8 rounded-full flex items-center justify-center ${
+            className={`w-16 h-16 sm:w-20 sm:h-20 mx-auto mb-6 sm:mb-8 rounded-full flex items-center justify-center ${
               theme === "dark" ? "bg-blue-500/20" : "bg-blue-100"
             }`}
           >
-            <ShieldCheck className="w-10 h-10 text-blue-500" />
+            <ShieldCheck className="w-8 h-8 sm:w-10 sm:h-10 text-blue-500" />
           </div>
 
           <h2
-            className={`text-3xl font-black mb-4 ${
+            className={`text-2xl sm:text-3xl font-black mb-3 sm:mb-4 ${
               theme === "dark" ? "text-white" : "text-slate-900"
             }`}
           >
-            כניסה לממשק ניהול
+            כניסה למערכת
           </h2>
           <p
-            className={`text-sm mb-8 ${
+            className={`text-xs sm:text-sm mb-6 sm:mb-8 ${
               theme === "dark" ? "text-slate-400" : "text-slate-600"
             }`}
           >
-            הזן את סיסמת המנהל כדי לגשת לניהול המחירון
+            הזן שם משתמש וסיסמה
           </p>
 
           <form onSubmit={handleSubmit} className="space-y-6">
+            {/* שדה שם משתמש */}
+            <div className="relative">
+              <div
+                className={`absolute right-4 top-1/2 -translate-y-1/2 ${
+                  theme === "dark" ? "text-slate-500" : "text-slate-400"
+                }`}
+              >
+                <User className="w-5 h-5" />
+              </div>
+              <input
+                type="text"
+                value={username}
+                onChange={(e) => {
+                  setUsername(e.target.value);
+                  setError("");
+                }}
+                placeholder="שם משתמש"
+                disabled={attempts >= 5}
+                autoComplete="username"
+                className={`w-full pr-12 pl-4 py-4 rounded-2xl text-lg font-bold transition-all outline-none ${
+                  theme === "dark"
+                    ? "bg-slate-800 border-2 border-slate-700 focus:border-blue-500 text-white placeholder:text-slate-500"
+                    : "bg-slate-100 border-2 border-slate-200 focus:border-blue-500 text-slate-900 placeholder:text-slate-400"
+                } ${error ? "border-red-500" : ""} ${
+                  attempts >= 5 ? "opacity-50 cursor-not-allowed" : ""
+                }`}
+                autoFocus
+              />
+            </div>
+
+            {/* שדה סיסמה */}
             <div className="relative">
               <div
                 className={`absolute right-4 top-1/2 -translate-y-1/2 ${
@@ -85,8 +129,9 @@ export function AdminAuth({ theme, onAuthenticated, onCancel }: AdminAuthProps) 
                   setPassword(e.target.value);
                   setError("");
                 }}
-                placeholder="סיסמת מנהל"
+                placeholder="סיסמה"
                 disabled={attempts >= 5}
+                autoComplete="current-password"
                 className={`w-full pr-12 pl-12 py-4 rounded-2xl text-lg font-bold transition-all outline-none ${
                   theme === "dark"
                     ? "bg-slate-800 border-2 border-slate-700 focus:border-blue-500 text-white placeholder:text-slate-500"
@@ -94,7 +139,6 @@ export function AdminAuth({ theme, onAuthenticated, onCancel }: AdminAuthProps) 
                 } ${error ? "border-red-500" : ""} ${
                   attempts >= 5 ? "opacity-50 cursor-not-allowed" : ""
                 }`}
-                autoFocus
               />
               <button
                 type="button"
@@ -123,16 +167,16 @@ export function AdminAuth({ theme, onAuthenticated, onCancel }: AdminAuthProps) 
             <div className="flex flex-col gap-4">
               <button
                 type="submit"
-                disabled={!password || attempts >= 5}
+                disabled={!username || !password || attempts >= 5 || loading}
                 className={`w-full py-4 rounded-2xl font-black text-lg transition-all ${
-                  password && attempts < 5
+                  username && password && attempts < 5 && !loading
                     ? "bg-blue-600 text-white hover:bg-blue-700 hover:scale-[1.02] shadow-xl"
                     : theme === "dark"
                     ? "bg-slate-800 text-slate-500 cursor-not-allowed"
                     : "bg-slate-200 text-slate-400 cursor-not-allowed"
                 }`}
               >
-                כניסה
+                {loading ? "מתחבר..." : "כניסה"}
               </button>
               <button
                 type="button"
@@ -147,6 +191,21 @@ export function AdminAuth({ theme, onAuthenticated, onCancel }: AdminAuthProps) 
               </button>
             </div>
           </form>
+
+          {/* רמז לפיתוח */}
+          <div
+            className={`mt-8 p-4 rounded-2xl text-xs text-right space-y-1 ${
+              theme === "dark"
+                ? "bg-slate-800/50 text-slate-400 border border-slate-700"
+                : "bg-slate-50 text-slate-600 border border-slate-200"
+            }`}
+          >
+            <div className="font-bold mb-2">משתמשים לפיתוח (סיסמה: 1234):</div>
+            <div>• <code className="font-mono">admin</code> — {ROLE_LABELS.admin}</div>
+            <div>• <code className="font-mono">manager</code> — {ROLE_LABELS.warehouse_manager}</div>
+            <div>• <code className="font-mono">warehouse</code> — {ROLE_LABELS.warehouse}</div>
+            <div>• <code className="font-mono">tech</code> — {ROLE_LABELS.technician}</div>
+          </div>
         </div>
       </div>
     </div>

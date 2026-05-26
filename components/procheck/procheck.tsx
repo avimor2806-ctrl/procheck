@@ -2,7 +2,7 @@
 
 import { useState, useEffect, useMemo, useCallback } from "react";
 import { Loader2 } from "lucide-react";
-import { collection, onSnapshot, doc, writeBatch, deleteDoc } from "firebase/firestore";
+import { collection, onSnapshot, doc, writeBatch, deleteDoc, updateDoc, setDoc } from "firebase/firestore";
 import { signInAnonymously } from "firebase/auth";
 import { db, auth } from "@/lib/firebase";
 import {
@@ -19,6 +19,8 @@ import type {
   ViewType,
   SelectionType,
   ThemeType,
+  Technician,
+  InventoryFilter,
   Notification as NotificationType,
 } from "@/lib/types";
 import { Header } from "./header";
@@ -26,11 +28,25 @@ import { Footer } from "./footer";
 import { UserPanel } from "./user-panel";
 import { AdminPanel } from "./admin-panel";
 import { AdminAuth } from "./admin-auth";
+import { ProfileModal } from "./profile-modal";
+import { UsersManager } from "./users-manager";
 import { AIModal } from "./ai-modal";
 import { BulkModal } from "./bulk-modal";
 import { ItemsManager } from "./items-manager";
+import { TechniciansManager } from "./technicians-manager";
 import { EditItemModal } from "./edit-item-modal";
 import { Notification } from "./notification";
+import {
+  loadSession,
+  clearSession,
+  canViewAdmin,
+  canManageTechnicians,
+  canManageUsers,
+  canAccessAdvancedInventory,
+  renamePasswordRecord,
+  ROLE_LABELS,
+  type SessionUser,
+} from "@/lib/users";
 
 const GEMINI_API_KEY = process.env.NEXT_PUBLIC_GEMINI_API_KEY || "AIzaSyBX4IqtkEOIS1AL8_Y6cabP7gkYEVAI4sE";
 
@@ -39,8 +55,11 @@ export function ProCheck() {
   const [view, setView] = useState<ViewType>("user");
   const [theme, setTheme] = useState<ThemeType>("dark");
   const [loading, setLoading] = useState(true);
-  const [isAdminAuthenticated, setIsAdminAuthenticated] = useState(false);
+  const [currentUser, setCurrentUser] = useState<SessionUser | null>(null);
   const [showAdminAuth, setShowAdminAuth] = useState(false);
+  const [isProfileOpen, setIsProfileOpen] = useState(false);
+  const [isUsersManagerOpen, setIsUsersManagerOpen] = useState(false);
+  const isAdminAuthenticated = currentUser !== null && canViewAdmin(currentUser.role);
 
   const [selectedModel, setSelectedModel] = useState("");
   const [selectionType, setSelectionType] = useState<SelectionType>("fault");
@@ -76,12 +95,18 @@ export function ProCheck() {
   const [editedDefaults, setEditedDefaults] = useState<{ [key: string]: string }>({});
   const [editingItem, setEditingItem] = useState<PriceItem | null>(null);
   const [isEditModalOpen, setIsEditModalOpen] = useState(false);
+  const [technicians, setTechnicians] = useState<Technician[]>([]);
+  const [isTechniciansManagerOpen, setIsTechniciansManagerOpen] = useState(false);
+  const [inventoryFilter, setInventoryFilter] = useState<InventoryFilter>("all");
+
+  // האם המשתמש הנוכחי יכול לראות פריטי מלאי מתקדם?
+  const canSeeAdvanced = canAccessAdvancedInventory(currentUser);
 
   useEffect(() => {
-    // Check if admin was previously authenticated in this session
-    const adminAuth = sessionStorage.getItem("adminAuth");
-    if (adminAuth === "true") {
-      setIsAdminAuthenticated(true);
+    // Load logged-in user from session storage
+    const user = loadSession();
+    if (user) {
+      setCurrentUser(user);
     }
   }, []);
 
@@ -147,9 +172,25 @@ export function ProCheck() {
       }
     );
 
+    // Listen for technicians
+    const unsubscribeTechs = onSnapshot(
+      collection(db, "technicians"),
+      (snapshot) => {
+        const techs = snapshot.docs.map((docSnapshot) => ({
+          id: docSnapshot.id,
+          ...docSnapshot.data(),
+        })) as Technician[];
+        setTechnicians(techs);
+      },
+      (error) => {
+        console.error("Technicians error:", error);
+      }
+    );
+
     return () => {
       unsubscribePricelist();
       unsubscribeCustomItems();
+      unsubscribeTechs();
     };
   }, []);
 
@@ -252,8 +293,17 @@ export function ProCheck() {
       selectionType === "accessory" && (selectedItemName === "מגירות" || selectedItemName === "ניי��")
         ? selectedSubItem
         : selectedItemName;
-    return items.find((i) => i.model === selectedModel && i.name === name);
-  }, [items, selectedModel, selectedItemName, selectedSubItem, selectionType]);
+    const match = items.find((i) => i.model === selectedModel && i.name === name);
+    if (!match) return undefined;
+    // אם טכנאי ללא הרשאה - הגיע לפריט מתקדם, לא להחזיר
+    if (!canSeeAdvanced && match.isAdvanced) return undefined;
+    // טכנאי עם הרשאה - כבד את פילטר התצוגה
+    if (canSeeAdvanced) {
+      if (inventoryFilter === "regular" && match.isAdvanced) return undefined;
+      if (inventoryFilter === "advanced" && !match.isAdvanced) return undefined;
+    }
+    return match;
+  }, [items, selectedModel, selectedItemName, selectedSubItem, selectionType, canSeeAdvanced, inventoryFilter]);
 
   const groupedItems = useMemo(() => {
     const groups: Record<string, GroupedItem> = {};
@@ -609,6 +659,115 @@ export function ProCheck() {
   };
 
   // Handle restoring removed default items
+  // Toggle the "isAdvanced" flag on a single price item
+  const handleToggleAdvancedItem = async (id: string, value: boolean) => {
+    try {
+      await updateDoc(doc(db, "pricelist", id), { isAdvanced: value });
+      showNotification(
+        value ? "הפריט סומן כמלאי מתקדם" : "תיוג מלאי מתקדם הוסר"
+      );
+    } catch (err) {
+      console.error("Toggle advanced error:", err);
+      showNotification("שגיאה בעדכון", "error");
+    }
+  };
+
+  // Technicians CRUD
+  const handleAddTechnician = async (
+    displayName: string,
+    username: string,
+    advancedAccess: boolean = false
+  ) => {
+    try {
+      const newDocRef = doc(collection(db, "technicians"));
+      await setDoc(newDocRef, {
+        displayName,
+        username,
+        advancedAccess,
+        active: true,
+        createdAt: new Date().toISOString(),
+      });
+      showNotification(
+        advancedAccess
+          ? `הטכנאי "${displayName}" נוסף עם גישה למלאי מתקדם`
+          : `הטכנאי "${displayName}" נוסף בהצלחה`
+      );
+    } catch (err) {
+      console.error("Add technician error:", err);
+      showNotification("שגיאה בהוספת טכנאי", "error");
+    }
+  };
+
+  const handleRemoveTechnician = async (id: string) => {
+    try {
+      await deleteDoc(doc(db, "technicians", id));
+      showNotification("הטכנאי נמחק בהצלחה");
+    } catch (err) {
+      console.error("Remove technician error:", err);
+      showNotification("שגיאה במחיקה", "error");
+    }
+  };
+
+  const handleToggleTechnicianAdvanced = async (id: string, value: boolean) => {
+    try {
+      await updateDoc(doc(db, "technicians", id), { advancedAccess: value });
+      showNotification(
+        value ? "הטכנאי קיבל גישה למלאי מתקדם" : "גישת מלאי מתקדם הוסרה"
+      );
+    } catch (err) {
+      console.error("Toggle technician advanced error:", err);
+      showNotification("שגיאה בעדכון הרשאה", "error");
+    }
+  };
+
+  // עדכון שם משתמש לטכנאי - admin בלבד
+  const handleUpdateTechnicianUsername = async (
+    id: string,
+    oldUsername: string,
+    newUsername: string
+  ) => {
+    if (!currentUser || !canManageUsers(currentUser.role)) {
+      showNotification("אין לך הרשאה לפעולה זו", "error");
+      return;
+    }
+    const trimmed = newUsername.trim();
+    if (!trimmed) {
+      showNotification("שם משתמש לא יכול להיות ריק", "error");
+      return;
+    }
+    try {
+      await updateDoc(doc(db, "technicians", id), { username: trimmed });
+      await renamePasswordRecord(oldUsername, trimmed);
+      showNotification(`שם המשתמש עודכן ל-${trimmed}`);
+    } catch (err) {
+      console.error("Update username error:", err);
+      showNotification("שגיאה בעדכון שם המשתמש", "error");
+    }
+  };
+
+  // עדכון שם תצוגה לטכנאי - admin בלבד
+  const handleUpdateTechnicianDisplayName = async (
+    id: string,
+    newName: string
+  ) => {
+    if (!currentUser || !canManageUsers(currentUser.role)) {
+      showNotification("אין לך הרשאה לפעולה זו", "error");
+      return;
+    }
+    const trimmed = newName.trim();
+    if (!trimmed) {
+      showNotification("שם תצוגה לא יכול להיות ריק", "error");
+      return;
+    }
+    try {
+      await updateDoc(doc(db, "technicians", id), { displayName: trimmed });
+      showNotification(`שם התצוגה עודכן ל-${trimmed}`);
+    } catch (err) {
+      console.error("Update displayName error:", err);
+      showNotification("שגיאה בעדכון שם תצוגה", "error");
+    }
+  };
+
   const handleRestoreDefaultItem = async (name: string, type: "model" | "fault" | "accessory") => {
     try {
       const removeType = type === "model" ? "removedModel" : type === "fault" ? "removedFault" : "removedAccessory";
@@ -666,7 +825,25 @@ export function ProCheck() {
           }
         }}
         onOpenAiModal={() => setIsAiModalOpen(true)}
+        isAuthenticated={currentUser !== null}
+        onOpenProfile={() => setIsProfileOpen(true)}
       />
+
+      {currentUser && (
+        <ProfileModal
+          theme={theme}
+          isOpen={isProfileOpen}
+          onClose={() => setIsProfileOpen(false)}
+          currentUser={currentUser}
+          onLogout={() => {
+            clearSession();
+            setCurrentUser(null);
+            setView("user");
+            setShowAdminAuth(false);
+            showNotification("התנתקת בהצלחה", "success");
+          }}
+        />
+      )}
 
       <main
         className="flex-1 max-w-4xl mx-auto w-full p-4 md:p-8 space-y-10 relative z-10"
@@ -675,10 +852,10 @@ export function ProCheck() {
         {showAdminAuth && !isAdminAuthenticated ? (
           <AdminAuth
             theme={theme}
-            onAuthenticated={() => {
-              setIsAdminAuthenticated(true);
+            onAuthenticated={(user) => {
+              setCurrentUser(user);
               setShowAdminAuth(false);
-              setView("admin");
+              setView(canViewAdmin(user.role) ? "admin" : "user");
             }}
             onCancel={() => {
               setShowAdminAuth(false);
@@ -706,6 +883,9 @@ export function ProCheck() {
             summaryLoading={summaryLoading}
             onGenerateSummary={generateProfessionalSummary}
             showNotification={showNotification}
+            canSeeAdvanced={canSeeAdvanced}
+            inventoryFilter={inventoryFilter}
+            setInventoryFilter={setInventoryFilter}
           />
         ) : (
           <AdminPanel
@@ -723,9 +903,18 @@ export function ProCheck() {
               setIsBulkModalOpen(true);
             }}
             onOpenItemsManager={() => setIsItemsManagerOpen(true)}
+            onOpenTechniciansManager={() => setIsTechniciansManagerOpen(true)}
+            onOpenUsersManager={() => setIsUsersManagerOpen(true)}
             onDeleteGroup={handleDeleteGroup}
             onDeleteItem={handleDeleteItem}
             onEditItem={handleEditItem}
+            onToggleAdvancedItem={handleToggleAdvancedItem}
+            canManageTechs={
+              currentUser ? canManageTechnicians(currentUser.role) : false
+            }
+            canManageUsers={
+              currentUser ? canManageUsers(currentUser.role) : false
+            }
           />
         )}
       </main>
@@ -786,6 +975,30 @@ export function ProCheck() {
         onEditDefaultItem={handleEditDefaultItem}
         onRestoreDefaultItem={handleRestoreDefaultItem}
       />
+
+      <TechniciansManager
+        theme={theme}
+        isOpen={isTechniciansManagerOpen}
+        onClose={() => setIsTechniciansManagerOpen(false)}
+        technicians={technicians}
+        onAddTechnician={handleAddTechnician}
+        onRemoveTechnician={handleRemoveTechnician}
+        onToggleAdvanced={handleToggleTechnicianAdvanced}
+      />
+
+      {currentUser && canManageUsers(currentUser.role) && (
+        <UsersManager
+          theme={theme}
+          isOpen={isUsersManagerOpen}
+          onClose={() => setIsUsersManagerOpen(false)}
+          technicians={technicians}
+          onUpdateTechnicianUsername={handleUpdateTechnicianUsername}
+          onUpdateTechnicianDisplayName={handleUpdateTechnicianDisplayName}
+          onRemoveTechnician={handleRemoveTechnician}
+          onToggleAdvanced={handleToggleTechnicianAdvanced}
+          showNotification={showNotification}
+        />
+      )}
 
       <EditItemModal
         theme={theme}

@@ -36,6 +36,9 @@ export const PAPER_TYPES = [
   "נייר ענק"
 ];
 
+// קטגוריית אנליזה - מלאי מתקדם הזמין רק לטכנאים מורשים
+export const GLOBAL_ANALYSIS_LIST: string[] = [];
+
 export const DEFAULT_MODELS = [
   "T650\\C טריניטי",
   "סדרת מכשירי VX",
